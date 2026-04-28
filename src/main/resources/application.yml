@@ -1,0 +1,86 @@
+spring:
+  application:
+    name: virtual-human
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  datasource:
+    url: ${MYSQL_URL:jdbc:mysql://localhost:3306/vh?useSSL=false&serverTimezone=UTC&characterEncoding=UTF-8&allowPublicKeyRetrieval=true}
+    username: ${MYSQL_USER:vh}
+    password: ${MYSQL_PASSWORD:vhpass}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    table: flyway_schema_history
+
+  threads:
+    virtual:
+      enabled: true    # Java 21 Virtual Threads
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+  mapper-locations: classpath*:mapper/**/*.xml
+
+# 业务配置 (自写 @ConfigurationProperties 读取, 见 com.vh.config.*)
+vh:
+  llm:
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: https://api.deepseek.com/v1
+      default-model: deepseek-chat
+      temperature: 0.7
+      timeout-seconds: 60
+  milvus:
+    host: ${MILVUS_HOST:localhost}
+    port: ${MILVUS_PORT:19530}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+  health:
+    redis:
+      enabled: true
+    db:
+      enabled: true
+
+server:
+  port: 8080
+  compression:
+    enabled: true
+  shutdown: graceful
+
+logging:
+  # appender / 输出格式 见 logback-spring.xml; 这里只管 level
+  level:
+    root: INFO
+    com.vh: DEBUG
+    dev.langchain4j: INFO
+    org.springframework.jdbc: WARN
