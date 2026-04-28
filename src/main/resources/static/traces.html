@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trace 浏览 · Virtual Human</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: #fafafa; color: #222;
+    display: flex; flex-direction: column;
+  }
+  header {
+    background: white; border-bottom: 1px solid #e8e8e8;
+    padding: 10px 18px; display: flex; align-items: baseline; gap: 16px;
+  }
+  header h2 { margin: 0; font-size: 17px; font-weight: 600; }
+  header .subtitle { color: #888; font-size: 12px; }
+  header .spacer { flex: 1; }
+  header button {
+    padding: 4px 12px; font-size: 12px;
+    background: #1976d2; color: white; border: none;
+    border-radius: 4px; cursor: pointer;
+  }
+  header button.secondary { background: #888; }
+
+  main {
+    flex: 1; display: flex; min-height: 0;
+  }
+  #conv-list {
+    width: 320px; border-right: 1px solid #e8e8e8;
+    background: white; overflow-y: auto;
+  }
+  .conv-item {
+    padding: 12px 16px; border-bottom: 1px solid #f0f0f0;
+    cursor: pointer;
+  }
+  .conv-item:hover { background: #f7faff; }
+  .conv-item.active { background: #e3f2fd; }
+  .conv-item .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .conv-item .conv-id { font-weight: 600; color: #1976d2; font-size: 13px; }
+  .conv-item .vh { font-size: 11px; color: #888; }
+  .conv-item .stats { font-size: 11px; color: #666; margin-top: 4px; }
+  .conv-item .ts { font-size: 11px; color: #aaa; margin-top: 2px; }
+
+  #trace-detail {
+    flex: 1; overflow-y: auto; padding: 18px 24px;
+  }
+  .empty {
+    color: #888; padding: 60px 20px; text-align: center; font-size: 13px;
+  }
+  .turn {
+    background: white; border: 1px solid #e8e8e8; border-radius: 8px;
+    margin-bottom: 16px; overflow: hidden;
+  }
+  .turn-header {
+    padding: 10px 14px; background: #f7f7f9;
+    border-bottom: 1px solid #e8e8e8;
+    font-size: 13px; color: #444;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .turn-header .turn-no {
+    background: #1976d2; color: white;
+    border-radius: 10px; padding: 2px 8px;
+    font-size: 11px;
+  }
+  .turn-header .turn-stats { color: #888; font-size: 11px; margin-left: auto; }
+
+  .step {
+    border-top: 1px solid #f0f0f0;
+  }
+  .step:first-child { border-top: none; }
+  .step-row {
+    padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+    cursor: pointer; font-size: 13px;
+  }
+  .step-row:hover { background: #fafafa; }
+  .step-row .badge {
+    display: inline-block; padding: 2px 8px;
+    border-radius: 4px; font-size: 11px; font-weight: 600;
+    color: white;
+  }
+  .badge.INTENT_CLASSIFY { background: #7c4dff; }
+  .badge.ROUTE          { background: #455a64; }
+  .badge.LLM_CHAT       { background: #2e7d32; }
+  .badge.TOOL_CALL      { background: #ef6c00; }
+  .step-row .summary { color: #555; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .step-row .duration { color: #888; font-size: 11px; }
+  .step-row .err { color: #c62828; font-size: 11px; }
+  .step-row .arrow { color: #aaa; font-size: 11px; transition: transform 0.15s; }
+  .step.open .step-row .arrow { transform: rotate(90deg); }
+
+  .step-body {
+    display: none; padding: 0 14px 12px 14px; font-size: 12px;
+  }
+  .step.open .step-body { display: block; }
+  .step-body h4 {
+    margin: 8px 0 4px 0; font-size: 11px; color: #666;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .step-body pre {
+    background: #f5f5f7; border: 1px solid #ececef;
+    border-radius: 6px; padding: 10px;
+    font-size: 11.5px; line-height: 1.5;
+    overflow-x: auto; margin: 0;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 320px; overflow-y: auto;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h2>Trace 浏览</h2>
+    <span class="subtitle">execution_trace 实时</span>
+    <span class="spacer"></span>
+    <button onclick="loadConversations()">刷新</button>
+    <button class="secondary" onclick="window.location.href='/chat.html'">回聊天页</button>
+  </header>
+  <main>
+    <div id="conv-list"></div>
+    <div id="trace-detail">
+      <div class="empty">从左侧选一个会话查看 trace</div>
+    </div>
+  </main>
+
+<script>
+const STEP_ORDER = { INTENT_CLASSIFY: 0, ROUTE: 1, LLM_CHAT: 2, TOOL_CALL: 3 };
+let activeConvId = null;
+
+async function loadConversations() {
+  const list = document.getElementById('conv-list');
+  list.innerHTML = '<div class="empty">加载中...</div>';
+  try {
+    const resp = await fetch('/api/traces/conversations?limit=50');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const items = await resp.json();
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">暂无 trace 数据,<br>先到聊天页发几条消息</div>';
+      return;
+    }
+    list.innerHTML = '';
+    items.forEach(it => {
+      const div = document.createElement('div');
+      div.className = 'conv-item' + (it.conversationId === activeConvId ? ' active' : '');
+      div.dataset.cid = it.conversationId;
+      div.innerHTML = `
+        <div class="top">
+          <span class="conv-id">conv #${it.conversationId}</span>
+          <span class="vh">vh #${it.vhId}</span>
+        </div>
+        <div class="stats">${it.turnCount} 轮 · ${it.stepCount} 步 · ${formatMs(it.totalMs)}</div>
+        <div class="ts">${formatTs(it.lastTraceAt)}</div>
+      `;
+      div.onclick = () => loadTrace(it.conversationId);
+      list.appendChild(div);
+    });
+  } catch (e) {
+    list.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
+  }
+}
+
+async function loadTrace(convId) {
+  activeConvId = convId;
+  document.querySelectorAll('.conv-item').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.cid) === convId);
+  });
+  const detail = document.getElementById('trace-detail');
+  detail.innerHTML = '<div class="empty">加载中...</div>';
+  try {
+    const resp = await fetch('/api/traces/conversations/' + convId);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const steps = await resp.json();
+    if (!steps.length) {
+      detail.innerHTML = '<div class="empty">该会话无 trace</div>';
+      return;
+    }
+    renderTurns(detail, convId, steps);
+  } catch (e) {
+    detail.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function renderTurns(detail, convId, steps) {
+  // 按 INTENT_CLASSIFY 出现位置切分轮; 起点之前若有零散步骤(异常情况), 归到一个 "pre" 桶.
+  const turns = [];
+  let cur = null;
+  steps.forEach(s => {
+    if (s.step === 'INTENT_CLASSIFY') {
+      if (cur) turns.push(cur);
+      cur = { steps: [] };
+    } else if (!cur) {
+      cur = { steps: [] };
+    }
+    cur.steps.push(s);
+  });
+  if (cur) turns.push(cur);
+
+  detail.innerHTML = '';
+  const title = document.createElement('div');
+  title.style.cssText = 'margin-bottom:12px; font-size:13px; color:#666;';
+  title.textContent = `conv #${convId} · ${turns.length} 轮 · ${steps.length} 步`;
+  detail.appendChild(title);
+
+  turns.forEach((turn, idx) => {
+    const userMsg = pickUserMessage(turn);
+    const totalMs = turn.steps.reduce((a, s) => a + (s.durationMs || 0), 0);
+    const tEl = document.createElement('div');
+    tEl.className = 'turn';
+    tEl.innerHTML = `
+      <div class="turn-header">
+        <span class="turn-no">轮 ${idx + 1}</span>
+        <span class="turn-msg"></span>
+        <span class="turn-stats">${turn.steps.length} 步 · ${formatMs(totalMs)}</span>
+      </div>
+    `;
+    tEl.querySelector('.turn-msg').textContent = truncate(userMsg, 80);
+
+    turn.steps.forEach(s => tEl.appendChild(renderStep(s)));
+    detail.appendChild(tEl);
+  });
+}
+
+function pickUserMessage(turn) {
+  const ic = turn.steps.find(s => s.step === 'INTENT_CLASSIFY');
+  if (ic && ic.input && ic.input.userMessage) return ic.input.userMessage;
+  return '(未识别用户消息)';
+}
+
+function renderStep(s) {
+  const wrap = document.createElement('div');
+  wrap.className = 'step';
+  wrap.innerHTML = `
+    <div class="step-row">
+      <span class="badge ${s.step}">${s.step}</span>
+      <span class="summary"></span>
+      <span class="duration">${formatMs(s.durationMs)}</span>
+      ${s.errorMsg ? '<span class="err">err</span>' : ''}
+      <span class="arrow">▶</span>
+    </div>
+    <div class="step-body">
+      <h4>input</h4><pre></pre>
+      <h4>output</h4><pre></pre>
+      ${s.errorMsg ? '<h4>error</h4><pre class="err-pre"></pre>' : ''}
+    </div>
+  `;
+  wrap.querySelector('.summary').textContent = summarize(s);
+  const pres = wrap.querySelectorAll('pre');
+  pres[0].textContent = formatJson(s.input);
+  pres[1].textContent = formatJson(s.output);
+  if (s.errorMsg) wrap.querySelector('.err-pre').textContent = s.errorMsg;
+  wrap.querySelector('.step-row').onclick = () => wrap.classList.toggle('open');
+  return wrap;
+}
+
+function summarize(s) {
+  const o = s.output || {};
+  const i = s.input || {};
+  switch (s.step) {
+    case 'INTENT_CLASSIFY':
+      return `→ ${o.intentCode}  conf=${o.confidence}${o.fallback ? '  (fallback)' : ''}`;
+    case 'ROUTE': {
+      const codes = Array.isArray(o.boundToolCodes) ? o.boundToolCodes : [];
+      return `→ ${o.worker}${codes.length ? '  · ' + codes.join(',') : ''}`;
+    }
+    case 'LLM_CHAT': {
+      const tools = i.tools && i.tools !== '(none)' ? '  tools=' + i.tools : '';
+      const tok = (o.promptTokens > 0 || o.completionTokens > 0)
+        ? `  pTok=${o.promptTokens} cTok=${o.completionTokens}` : '';
+      const tr = o.toolRequests > 0 ? `  toolReq=${o.toolRequests}` : '';
+      return `iter=${i.iter ?? 1}${tools}${tr}${tok}`;
+    }
+    case 'TOOL_CALL': {
+      const par = i.parallelGroupSize > 1 ? `  ‖×${i.parallelGroupSize}` : '';
+      return `${i.name}(${truncate(i.args || '', 60)})${par}`;
+    }
+    default:
+      return '';
+  }
+}
+
+function formatJson(v) {
+  if (v == null) return '(null)';
+  try { return JSON.stringify(v, null, 2); }
+  catch { return String(v); }
+}
+function formatMs(ms) {
+  if (ms == null) return '-';
+  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(2) + 's';
+}
+function formatTs(s) {
+  if (!s) return '';
+  return s.replace('T', ' ').replace(/\.\d+$/, '').slice(0, 19);
+}
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n) + '...' : s;
+}
+
+loadConversations();
+</script>
+</body>
+</html>

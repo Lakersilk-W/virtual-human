@@ -35,3 +35,6 @@ volumes/
 
 # Claude Code 用户本地设置 (含 hooks / 个人 permission), 不入库
 .claude/settings.local.json
+
+# Obsidian 编辑器本地配置, 不入库
+.obsidian/
