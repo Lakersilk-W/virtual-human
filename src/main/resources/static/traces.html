@@ -18,6 +18,13 @@
   }
   header h2 { margin: 0; font-size: 17px; font-weight: 600; }
   header .subtitle { color: #888; font-size: 12px; }
+  header .cost-banner {
+    font-size: 12px; color: #555; padding: 3px 10px;
+    background: #f0f7ff; border: 1px solid #cce0ff;
+    border-radius: 4px;
+  }
+  header .cost-banner b { color: #1976d2; font-weight: 600; }
+  header .cost-banner .sep { color: #aaa; margin: 0 6px; }
   header .spacer { flex: 1; }
   header button {
     padding: 4px 12px; font-size: 12px;
@@ -43,6 +50,7 @@
   .conv-item .conv-id { font-weight: 600; color: #1976d2; font-size: 13px; }
   .conv-item .vh { font-size: 11px; color: #888; }
   .conv-item .stats { font-size: 11px; color: #666; margin-top: 4px; }
+  .conv-item .cost { font-size: 11px; color: #1976d2; margin-top: 2px; font-weight: 500; }
   .conv-item .ts { font-size: 11px; color: #aaa; margin-top: 2px; }
 
   #trace-detail {
@@ -67,6 +75,13 @@
     font-size: 11px;
   }
   .turn-header .turn-stats { color: #888; font-size: 11px; margin-left: auto; }
+
+  .conv-cost-banner {
+    background: #f0f7ff; border: 1px solid #cce0ff;
+    border-radius: 6px; padding: 8px 12px; margin-bottom: 14px;
+    font-size: 12px; color: #555;
+  }
+  .conv-cost-banner b { color: #1976d2; font-weight: 600; }
 
   .step {
     border-top: 1px solid #f0f0f0;
@@ -119,6 +134,7 @@
   <header>
     <h2>Trace 浏览</h2>
     <span class="subtitle">execution_trace 实时</span>
+    <span id="cost-banner" class="cost-banner" style="display:none"></span>
     <span class="spacer"></span>
     <button onclick="loadConversations()">刷新</button>
     <button class="secondary" onclick="window.location.href='/chat.html'">回聊天页</button>
@@ -138,24 +154,36 @@ async function loadConversations() {
   const list = document.getElementById('conv-list');
   list.innerHTML = '<div class="empty">加载中...</div>';
   try {
-    const resp = await fetch('/api/traces/conversations?limit=50');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const items = await resp.json();
+    const [items, costList, summary] = await Promise.all([
+      fetch('/api/traces/conversations?limit=50').then(r => r.json()),
+      fetch('/api/costs/conversations?limit=200').then(r => r.json()).catch(() => []),
+      fetch('/api/costs/summary').then(r => r.json()).catch(() => null),
+    ]);
+    renderCostHeader(summary);
+
+    const costMap = {};
+    (costList || []).forEach(c => { costMap[c.conversationId ?? c.conversation_id] = c; });
+
     if (!items.length) {
       list.innerHTML = '<div class="empty">暂无 trace 数据,<br>先到聊天页发几条消息</div>';
       return;
     }
     list.innerHTML = '';
     items.forEach(it => {
+      const cost = costMap[it.conversationId];
       const div = document.createElement('div');
       div.className = 'conv-item' + (it.conversationId === activeConvId ? ' active' : '');
       div.dataset.cid = it.conversationId;
+      const costLine = cost
+        ? `$${formatUsd(cost.cost_usd)} · ${cost.call_count} 次调用 · ${formatTok(cost.prompt_tokens, cost.completion_tokens)}`
+        : '';
       div.innerHTML = `
         <div class="top">
           <span class="conv-id">conv #${it.conversationId}</span>
           <span class="vh">vh #${it.vhId}</span>
         </div>
         <div class="stats">${it.turnCount} 轮 · ${it.stepCount} 步 · ${formatMs(it.totalMs)}</div>
+        ${costLine ? `<div class="cost">${costLine}</div>` : ''}
         <div class="ts">${formatTs(it.lastTraceAt)}</div>
       `;
       div.onclick = () => loadTrace(it.conversationId);
@@ -166,6 +194,15 @@ async function loadConversations() {
   }
 }
 
+function renderCostHeader(summary) {
+  const el = document.getElementById('cost-banner');
+  if (!summary) { el.style.display = 'none'; return; }
+  el.style.display = 'inline-block';
+  const total = formatUsd(summary.totalUsd);
+  const today = formatUsd(summary.todayUsd);
+  el.innerHTML = `今日 <b>$${today}</b> · 总计 <b>$${total}</b><span class="sep">·</span>调用 ${summary.totalCalls} 次`;
+}
+
 async function loadTrace(convId) {
   activeConvId = convId;
   document.querySelectorAll('.conv-item').forEach(el => {
@@ -174,20 +211,21 @@ async function loadTrace(convId) {
   const detail = document.getElementById('trace-detail');
   detail.innerHTML = '<div class="empty">加载中...</div>';
   try {
-    const resp = await fetch('/api/traces/conversations/' + convId);
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const steps = await resp.json();
+    const [steps, costRecords] = await Promise.all([
+      fetch('/api/traces/conversations/' + convId).then(r => r.json()),
+      fetch('/api/costs/conversations/' + convId).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
     if (!steps.length) {
       detail.innerHTML = '<div class="empty">该会话无 trace</div>';
       return;
     }
-    renderTurns(detail, convId, steps);
+    renderTurns(detail, convId, steps, costRecords);
   } catch (e) {
     detail.innerHTML = '<div class="empty">加载失败: ' + e.message + '</div>';
   }
 }
 
-function renderTurns(detail, convId, steps) {
+function renderTurns(detail, convId, steps, costRecords) {
   // 按 INTENT_CLASSIFY 出现位置切分轮; 起点之前若有零散步骤(异常情况), 归到一个 "pre" 桶.
   const turns = [];
   let cur = null;
@@ -203,6 +241,20 @@ function renderTurns(detail, convId, steps) {
   if (cur) turns.push(cur);
 
   detail.innerHTML = '';
+
+  // 成本 banner: 该会话累计开销
+  if (costRecords && costRecords.length) {
+    const totalUsd = costRecords.reduce((a, r) => a + Number(r.costUsd || 0), 0);
+    const totalP = costRecords.reduce((a, r) => a + (r.promptTokens || 0), 0);
+    const totalC = costRecords.reduce((a, r) => a + (r.completionTokens || 0), 0);
+    const banner = document.createElement('div');
+    banner.className = 'conv-cost-banner';
+    banner.innerHTML = `本会话成本: <b>$${formatUsd(totalUsd)}</b>` +
+      `  ·  ${costRecords.length} 次 LLM 调用` +
+      `  ·  prompt ${totalP} tok / completion ${totalC} tok`;
+    detail.appendChild(banner);
+  }
+
   const title = document.createElement('div');
   title.style.cssText = 'margin-bottom:12px; font-size:13px; color:#666;';
   title.textContent = `conv #${convId} · ${turns.length} 轮 · ${steps.length} 步`;
@@ -325,6 +377,15 @@ function formatMs(ms) {
 function formatTs(s) {
   if (!s) return '';
   return s.replace('T', ' ').replace(/\.\d+$/, '').slice(0, 19);
+}
+function formatUsd(v) {
+  const n = Number(v || 0);
+  if (n === 0) return '0';
+  if (n < 0.01) return n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  return n.toFixed(4);
+}
+function formatTok(p, c) {
+  return `${(p ?? 0)}/${(c ?? 0)} tok`;
 }
 function truncate(s, n) {
   if (!s) return '';

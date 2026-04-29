@@ -1,6 +1,8 @@
 package com.vh.runtime.model;
 
 import com.vh.config.LlmProperties;
+import com.vh.runtime.cost.CostTracker;
+import com.vh.runtime.cost.CostTrackingChatModel;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -30,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ChatModelFactory {
 
     private final LlmProperties llmProperties;
+    private final CostTracker costTracker;
     private final ConcurrentHashMap<String, ChatModel> chatCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, StreamingChatModel> streamingCache = new ConcurrentHashMap<>();
 
@@ -37,8 +40,10 @@ public class ChatModelFactory {
     public ChatModel get(String provider, String modelName) {
         String key = provider + ":" + modelName;
         return chatCache.computeIfAbsent(key, k -> {
-            log.info("Building ChatModel: provider={} model={}", provider, modelName);
-            return buildChat(provider, modelName);
+            log.info("Building ChatModel: provider={} model={} (with cost tracking)", provider, modelName);
+            ChatModel raw = buildChat(provider, modelName);
+            // W4.D22: 包一层装饰器, 每次 chat() 完自动落 cost_record
+            return new CostTrackingChatModel(raw, provider, modelName, costTracker);
         });
     }
 

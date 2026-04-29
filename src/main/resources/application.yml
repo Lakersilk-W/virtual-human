@@ -56,6 +56,15 @@ vh:
   milvus:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}
+  # LLM 定价: 每百万 tokens 多少美元. 未配置的模型成本计 0.
+  # DeepSeek 官网价 (cache-miss): https://api-docs.deepseek.com/quick_start/pricing
+  pricing:
+    deepseek-chat:
+      input-per-million-usd: 0.27
+      output-per-million-usd: 1.10
+    deepseek-reasoner:
+      input-per-million-usd: 0.55
+      output-per-million-usd: 2.19
 
 management:
   endpoints:

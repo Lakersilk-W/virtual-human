@@ -64,6 +64,12 @@ public class TraceCollector {
         return ctx == null ? List.of() : ctx.traces;
     }
 
+    /** 当前请求关联的 conversationId, 没有 trace 上下文时返回 null. CostTracker 等周边组件会用. */
+    public Long currentConversationId() {
+        Context ctx = current.get();
+        return ctx == null ? null : ctx.conversationId;
+    }
+
     public void end() {
         current.remove();
     }
