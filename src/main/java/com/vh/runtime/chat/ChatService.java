@@ -11,6 +11,8 @@ import com.vh.runtime.config.VhConfigLoader;
 import com.vh.runtime.intent.IntentResult;
 import com.vh.runtime.intent.IntentService;
 import com.vh.runtime.memory.ChatMemoryFactory;
+import com.vh.runtime.memory.FactExtractorService;
+import com.vh.runtime.memory.SummaryService;
 import com.vh.runtime.model.ChatModelFactory;
 import com.vh.runtime.trace.TraceCollector;
 import com.vh.runtime.trace.TraceStep;
@@ -66,6 +68,8 @@ public class ChatService {
     private final ChatMemoryFactory chatMemoryFactory;
     private final IntentService intentService;
     private final AgentRouter agentRouter;
+    private final SummaryService summaryService;
+    private final FactExtractorService factExtractorService;
     private final TraceCollector traceCollector;
     private final TraceWriter traceWriter;
 
@@ -106,7 +110,18 @@ public class ChatService {
                     vhId, conv.getId(), userMessage,
                     config, conv, memory, intent, route.boundTools());
 
-            return route.worker().handle(ctx);
+            ChatReply reply = route.worker().handle(ctx);
+
+            // W3.D16-17: 抽用户事实, upsert 到 memory_fact (跨会话长期记忆, 同步)
+            factExtractorService.extract(
+                    conv.getUserId(), conv.getId(),
+                    userMessage, reply.text(), config);
+
+            // W3.D15: 出口同步触发滚动摘要 (达阈值才动作, 概率每 ~7 轮一次)
+            // 注意会给用户响应额外加 1-3s 延迟; 后续若太抗用户感, 改 @Async 异步执行
+            summaryService.maybeRollup(conv.getId(), memory, config);
+
+            return reply;
         } finally {
             traceWriter.persist(traceCollector.drain());
             traceCollector.end();

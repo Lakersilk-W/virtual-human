@@ -79,11 +79,18 @@
              原因: 1) starter 版本绑定硬, 碎; 2) 自己注册更透明, 面试能讲。 -->
 
 
-        <!-- Vector DB (W3 使用, 先引入保编译通过) -->
+        <!-- Vector DB (W3) -->
         <dependency>
             <groupId>io.milvus</groupId>
             <artifactId>milvus-sdk-java</artifactId>
             <version>${milvus.version}</version>
+        </dependency>
+
+        <!-- 本地 embedding 模型: BGE-small-zh-v15 (512 维, ONNX in-process, 首次启动下载 ~100MB) -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-embeddings-bge-small-zh-v15</artifactId>
+            <version>1.0.0-beta3</version>
         </dependency>
 
         <!-- Utilities -->

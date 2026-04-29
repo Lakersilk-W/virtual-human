@@ -3,7 +3,55 @@
 按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/) 风格记录显著变更。
 版本号尚未发布到 GA, 用 `Unreleased` 段累积本期改动。
 
-## [Unreleased] — W2 收尾, 2026-04-28
+## [Unreleased] — W3 收尾, 2026-04-29
+
+### Added — 分层记忆系统 (亮点 #1)
+
+#### Summary 层 (D15)
+- `conversation_summary` 表 (V6); 每会话 1 行, version 自增
+- `SummaryService` — STM 中非 system 消息 ≥ 16 时触发 rollup, 把较老的 8 条压缩成摘要,
+  内存重写为 `[persona, [过往对话摘要] vN, last 8]`; 同步执行
+- 触发 hook 接在 `ChatService.chatAs` 出口 (Worker 返回后)
+
+#### Semantic 层 (D16-17)
+- `memory_fact` 表 (V7); UNIQUE (user_id, fact_key), 跨会话 user-scoped
+- `FactExtractorService` — 每轮 AI 回复后用 LLM 抽用户事实, JSON 输出, upsert 去重
+- `MemoryRecallService.recall` — 查 active facts 注入 `[关于用户的事实]` SystemMessage
+- prompt 显式区分 `[用户]` / `[助手]` 数据源, 拒绝从助手回应里抽事实
+
+#### Episodic 层 (D18-20)
+- `memory_episode` 表 (V8) + Milvus collection `episode_vectors` (512 维, IVF_FLAT, IP)
+- `EmbeddingConfig` — 本地 BGE-small-zh-v15 ONNX (in-process, ~100MB, 无外部 key)
+- `MilvusEpisodeStore` — 启动 ensure collection + index + load; 连不上不影响主对话
+- `EpisodeService.index` — embed summary → Milvus + memory_episode
+- `MemoryRecallService.recall` 扩展 — embed user msg + Milvus top-3 召回 (排除当前 conv) →
+  注入 `[相关历史话题]` SystemMessage
+- piggyback 在 SummaryService rollup 时同步索引 (kind=ROLLUP)
+
+#### W3 修补 (D21)
+- `EpisodeFinalizationScheduler` — `@Scheduled` 5min 扫描, 空闲 ≥ 5min 的 ACTIVE 会话
+  且无 FINALIZE episode → 索引整段 chat history (含 tail), 修补 rollup 永远漏掉 tail 的 bug
+- `memory_episode.kind` 列 (V9): ROLLUP / FINALIZE 两种触发
+- prompt 收紧 (Summary + FactExtractor): 显式禁止把 AI 即兴说的内容当成用户事实/经历;
+  放宽用户近况状态 (`pet_health_issue` / `current_focus`) 也可抽取
+
+### Added — Trace 扩展
+- 4 类新 step: `MEMORY_RECALL` (前置同步) / `FACT_EXTRACT` (后置同步) /
+  `SUMMARY_WRITE` (rollup 触发) / `EPISODE_INDEX` (rollup 同步 + finalize 异步)
+- traces.html: 5 种新 badge 颜色; MEMORY_RECALL summary 显示 fact + episode 双块;
+  EPISODE_INDEX summary 显示 kind 标签; pickUserMessage 检测异步 turn (无 INTENT_CLASSIFY) 标"⏱ 调度"
+
+### Architecture
+- `docs/architecture.md` 大改:
+  - Section 1 mermaid: Runtime 加 memory 子图含 7 个 W3 服务; Infra 加 Milvus/etcd/MinIO 三件套
+  - Section 2 时序图: 主链路加 MEMORY_RECALL/FACT_EXTRACT/SUMMARY_WRITE 步骤;
+    新增独立的"异步链路"时序图 (Scheduler → finalize)
+  - Section 3 数据流图: LongTerm 子图全部转实框
+  - Section 4 状态对照表: W3 列全部 ✅ (含 4 子项: 嵌入 / 向量库 / 异步任务 / 注入)
+  - Section 5 设计决策从 8 条扩到 13 条: 4 层记忆划分 / 本地 BGE 选型 / 不进 ChatMemory /
+    ROLLUP+FINALIZE 双触发 / prompt isolation
+
+## [W2] — 2026-04-26 ~ 04-28
 
 ### Added — Agent 编排
 - `IntentService` — 独立模型 (T=0) + JSON 输出的意图分类, 失败/低置信度走 fallback

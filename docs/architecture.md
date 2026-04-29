@@ -1,6 +1,6 @@
 # 架构总览
 
-> 截至 W2 收尾（2026-04-28），已实现的部分用实线框，规划中的部分用虚线框。
+> 截至 W3 收尾（2026-04-29），已实现的部分用实线框，规划中的部分用虚线框。
 
 ## 1. 分层架构
 
@@ -43,9 +43,16 @@ flowchart TB
             PromptComp[SystemPromptComposer<br/>注入当前日期]
         end
 
-        subgraph MemPkg["memory"]
-            MemFactory[ChatMemoryFactory<br/>MessageWindow N=20]
+        subgraph MemPkg["memory (含 W3 四层)"]
+            MemFactory[ChatMemoryFactory<br/>MessageWindow N=20<br/>STM]
             RedisStore[RedisChatMemoryStore]
+            Summary[SummaryService<br/>滚动摘要 / Summary 层]
+            Recall[MemoryRecallService<br/>facts + episodes 召回注入]
+            FactX[FactExtractorService<br/>用户事实抽取 / Semantic 层]
+            EpisodeSvc[EpisodeService<br/>向量索引 / Episodic 层]
+            FinalizeSched[EpisodeFinalizationScheduler<br/>5min 空闲兜底]
+            Milvus[MilvusEpisodeStore<br/>向量库客户端]
+            EmbModel[EmbeddingModel<br/>BGE-small-zh-v15 / 512 维]
         end
 
         subgraph ModelPkg["model"]
@@ -64,6 +71,8 @@ flowchart TB
         ChatSvc --> MemFactory
         ChatSvc --> IntentSvc
         ChatSvc --> Router
+        ChatSvc --> Summary
+        ChatSvc --> FactX
         ChatSvc --> Collector
         ChatSvc --> Writer
         IntentSvc --> ModelFactory
@@ -71,13 +80,29 @@ flowchart TB
         Router --> ToolW
         Chatter --> ModelFactory
         Chatter --> PromptComp
+        Chatter --> Recall
         ToolW --> ModelFactory
         ToolW --> ToolReg
         ToolW --> PromptComp
+        ToolW --> Recall
+        Summary --> EpisodeSvc
+        Summary --> ModelFactory
+        FactX --> ModelFactory
+        Recall --> EmbModel
+        Recall --> Milvus
+        EpisodeSvc --> EmbModel
+        EpisodeSvc --> Milvus
+        FinalizeSched --> Summary
+        FinalizeSched --> EpisodeSvc
+        FinalizeSched --> MemFactory
         Chatter --> Collector
         ToolW --> Collector
         Router --> Collector
         IntentSvc --> Collector
+        Summary --> Collector
+        FactX --> Collector
+        Recall --> Collector
+        EpisodeSvc --> Collector
         MemFactory --> RedisStore
         ToolReg --> Weather
         ToolReg --> Time
@@ -96,24 +121,27 @@ flowchart TB
         ToolDefMap[ToolDefMapper]
         ConvMap[ConversationMapper]
         TraceMap[ExecutionTraceMapper<br/>+ 会话聚合查询]
+        SumMap[ConversationSummaryMapper]
+        FactMap[MemoryFactMapper]
+        EpisodeMap[MemoryEpisodeMapper]
     end
 
     subgraph Infra["基础设施"]
         direction LR
-        MySQL[("MySQL 8<br/>配置 + 会话 + trace")]
+        MySQL[("MySQL 8<br/>配置 + 会话 + trace<br/>+ summary/fact/episode")]
         Redis[("Redis 7<br/>STM 滑窗 / TTL 7d")]
+        MilvusInfra[("Milvus 2.3<br/>向量库 / 512 维 IVF_FLAT")]
+        Etcd[("etcd<br/>Milvus 元数据")]
+        MinIO[("MinIO<br/>Milvus 对象存储")]
         DeepSeek(("DeepSeek<br/>OpenAI 兼容协议"))
         Wttr(("wttr.in<br/>免 key 天气"))
     end
 
-    subgraph Planned["规划中 (W3~W4)"]
+    subgraph Planned["规划中 (W4)"]
         direction TB
-        Summarizer["Summarizer<br/>滚动摘要 (W3)"]
-        Episodic["EpisodicMemory<br/>历史 chunk + 向量召回 (W3)"]
-        Semantic["SemanticMemory<br/>用户事实抽取 (W3)"]
-        CostTrack["CostTracker<br/>token / 成本聚合 (W4)"]
-        Eval["Evaluator<br/>20 条 golden case (W4)"]
-        Milvus[("Milvus 2.3<br/>向量库 (W3)")]
+        CostTrack["CostTracker<br/>token / 成本聚合"]
+        Eval["Evaluator<br/>20 条 golden case"]
+        FallbackProvider["多 Provider fallback<br/>Claude / Qwen"]
     end
 
     Client --> Web
@@ -130,21 +158,29 @@ flowchart TB
     Router --> IntToolMap
     ConvSvc --> ConvMap
     Writer --> TraceMap
+    Summary --> SumMap
+    FactX --> FactMap
+    Recall --> FactMap
+    Recall --> EpisodeMap
+    EpisodeSvc --> EpisodeMap
+    FinalizeSched --> ConvMap
+    FinalizeSched --> EpisodeMap
 
-    VHMap & VerMap & ModMap & PerMap & IntMap & IntAgMap & IntToolMap & ToolDefMap & ConvMap & TraceMap --> MySQL
+    VHMap & VerMap & ModMap & PerMap & IntMap & IntAgMap & IntToolMap & ToolDefMap & ConvMap & TraceMap & SumMap & FactMap & EpisodeMap --> MySQL
     RedisStore --> Redis
+    Milvus -.gRPC.-> MilvusInfra
+    MilvusInfra --> Etcd
+    MilvusInfra --> MinIO
     ModelFactory -.HTTPS.-> DeepSeek
     Weather -.HTTPS.-> Wttr
 
-    Episodic -.W3.-> Milvus
-
     classDef planned stroke-dasharray: 5 5,fill:#fafafa,stroke:#999,color:#666
-    class Planned,Summarizer,Episodic,Semantic,CostTrack,Eval,Milvus planned
+    class Planned,CostTrack,Eval,FallbackProvider planned
 ```
 
 ## 2. 一次 `chatAs` 调用的完整时序
 
-以「上海现在多少度，几点了」为例，演示 Intent → Router → ToolWorker 三段式 + 单轮 LLM_CHAT 内多工具并行调用。
+以「上海现在多少度，几点了」为例，演示 Intent → Router → ToolWorker 三段式 + 单轮 LLM_CHAT 内多工具并行调用 + W3 分层记忆链路。
 
 ```mermaid
 sequenceDiagram
@@ -185,13 +221,18 @@ sequenceDiagram
     end
 
     rect rgb(245, 250, 245)
-        Note over CS,Wttr: ③ Worker 执行 (ReAct 循环)
+        Note over CS,Wttr: ③ Worker 执行 (ReAct + 记忆召回)
         CS->>TW: handle(WorkerContext)
-        TW->>Mem: add(SystemMessage with 当前日期)
+        TW->>Mem: 首轮才 add(SystemMessage with 当前日期)
         TW->>Mem: add(UserMessage)
 
+        Note over TW,Mem: W3 召回 (每轮重查, 不入 ChatMemory)
+        TW->>Mem: 调 MemoryRecallService.recall(userId, convId, userMsg)
+        Mem->>Mem: 查 memory_fact (top 30) + embed userMsg + Milvus top-3
+        Mem-->>TW: [factsMsg?, episodesMsg?]<br/>(MEMORY_RECALL trace)
+
         Note over TW,Model: 第 1 轮: 模型并行请求两个工具
-        TW->>Model: chat(messages + 2 specs)
+        TW->>Model: chat([persona, facts, episodes, history] + 2 specs)
         Model-->>TW: AiMessage(toolRequests=[getWeather, getCurrentTime])
         TW->>TC: record(LLM_CHAT, messages 快照)
         TW->>Mem: add(AiMessage)
@@ -217,6 +258,15 @@ sequenceDiagram
     end
 
     TW-->>CS: ChatReply
+
+    rect rgb(255, 250, 240)
+        Note over CS,Model: ④ W3 记忆抽取 (同步, 后置)
+        CS->>Model: FactExtractor.extract(userMsg, aiReply)
+        Model-->>CS: JSON facts → upsert memory_fact<br/>(FACT_EXTRACT trace)
+        CS->>CS: SummaryService.maybeRollup<br/>若 chat history ≥ 16: 摘要 + 重写 mem
+        Note over CS: 若 rollup 触发: 同步索引 episode<br/>SUMMARY_WRITE + EPISODE_INDEX(kind=ROLLUP)
+    end
+
     CS->>TWr: persist(traceCollector.drain())
     TWr->>TWr: 批量 INSERT execution_trace
     CS->>TC: end()
@@ -224,12 +274,39 @@ sequenceDiagram
     VH-->>Client: 200 OK
 ```
 
+异步链路（独立于以上请求）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Sched as EpisodeFinalizationScheduler
+    participant Conv as conversation table
+    participant Mem as ChatMemory(Redis)
+    participant Sum as SummaryService
+    participant Ep as EpisodeService
+
+    Note over Sched: @Scheduled fixedDelay=5min
+    Sched->>Conv: 查 ACTIVE 且 last_active < now-5min<br/>且无 kind=FINALIZE episode
+    Conv-->>Sched: idle conv 列表
+    loop 每个 idle conv
+        Sched->>Mem: get(convId).messages()
+        Mem-->>Sched: [persona, summary?, ...history]
+        Sched->>Sum: summarizeText(rest 全部含 tail)
+        Sum-->>Sched: 完整 summary
+        Sched->>Ep: index(kind=FINALIZE)
+        Ep->>Ep: embed + Milvus insert + DB row
+    end
+```
+
 **几个关键点**：
-- 整条链路有 **5 步 trace**（INTENT_CLASSIFY × 1, ROUTE × 1, LLM_CHAT × 2, TOOL_CALL × 2），每步带 input/output JSON，`/traces.html` 上点开就能看
-- **并行**真正发生在第 1 轮 LLM_CHAT 之后：`CompletableFuture.allOf` 同时跑两个工具，总耗时 ≈ max(两个工具) 而非 sum。前提是模型在单轮内一次性吐多个 `ToolExecutionRequest`（DeepSeek 沿用 OpenAI 兼容协议支持）
-- **意图分类用独立模型**：与主模型解耦，方便降本（用 deepseek-chat T=0），主对话可换更贵的（W4 接 fallback 时再说）
-- `MAX_ITERATIONS=4` 仍保留，防止模型在工具循环里失控
-- `SystemPromptComposer` 在首轮 SystemMessage 末尾追加 "今天是 2026-04-28 星期二..."，避免模型不知道日期乱猜（曾出现"临近秋天"的 bug）
+- 主链路 trace 步骤数（典型 ReAct + 工具）：INTENT_CLASSIFY × 1, ROUTE × 1, MEMORY_RECALL × 1, LLM_CHAT × 2, TOOL_CALL × 2, FACT_EXTRACT × 1, （rollup 时）SUMMARY_WRITE × 1 + EPISODE_INDEX × 1 = 7-9 步
+- **并行**真正发生在第 1 轮 LLM_CHAT 之后：`CompletableFuture.allOf` 同时跑两个工具，总耗时 ≈ max(两个工具) 而非 sum
+- **MEMORY_RECALL 每轮都跑**：facts 来自 MySQL（DB 一行查询），episodes 来自 Milvus（embed + 向量搜，~300ms）；查到的 SystemMessage 注入 prompt，但**不写回 ChatMemory**——保证 facts/episodes 一旦更新下一轮立刻反映
+- **FACT_EXTRACT 每轮都跑**：用 LLM 抽用户事实 upsert，prompt 显式约束「仅从 [用户] 行抽，禁止从 [助手] 行抽」防止污染
+- **SUMMARY_WRITE 仅 ≥16 条 chat history 时触发**：内存被改写成 `[persona, summary, last 8]`；同步触发 EPISODE_INDEX(kind=ROLLUP) 索引被压缩段
+- **EPISODE_INDEX 还有第二种入口（异步）**：EpisodeFinalizationScheduler 每 5min 扫一次空闲会话，索引整段 chat history 含 tail（kind=FINALIZE）—— 修补 rollup 永远只压缩前半的盲区
+- **意图分类用独立模型**：与主模型解耦，方便降本（用 deepseek-chat T=0），主对话可换更贵的
+- `SystemPromptComposer` 在首轮 SystemMessage 末尾追加 "今天是 yyyy-MM-dd 周X"，避免模型不知道日期乱猜（曾出现"临近秋天"的 bug）
 
 ## 3. 数据流：配置 vs 运行时
 
@@ -262,33 +339,41 @@ flowchart LR
         Trace[(execution_trace<br/>每步 input/output JSON)]
     end
 
-    subgraph LongTerm["长期记忆 (W3)"]
+    subgraph LongTerm["长期记忆 (W3 已上线)"]
         direction TB
-        Summary[(conversation_summary)]
-        Episode[(memory_episode<br/>+ Milvus)]
-        Fact[(memory_fact)]
+        SummaryDb[(conversation_summary<br/>每会话 1 行, version 自增)]
+        Episode[(memory_episode<br/>kind=ROLLUP/FINALIZE)]
+        EpVec[("Milvus episode_vectors<br/>512 维 IVF_FLAT/IP")]
+        Fact[(memory_fact<br/>UNIQUE user_id+fact_key)]
     end
 
     VhConfigLoader -. 每次对话拍快照 .-> Conv
     Conv -- 1:N --> Msg
-    STM -. 异步压缩 .-> Summary
-    Msg -. 会话结束分块 .-> Episode
-    Msg -. FactExtractor .-> Fact
+    STM -. ≥16 条触发 .-> SummaryDb
+    SummaryDb -. 同步 .-> Episode
+    Episode -. embedding .-> EpVec
+    Conv -. 5min 空闲兜底 .-> Episode
+    STM -. 每轮抽 .-> Fact
 
     classDef planned stroke-dasharray: 5 5,fill:#fafafa,stroke:#999,color:#666
-    class Summary,Episode,Fact,LongTerm planned
+    class Msg planned
 ```
+
+> 注: `message` 表(M2M 审计) 仍是规划项. W3 期暂时用 ChatMemory(Redis, TTL 7d) 作为消息源, summary/episode 直接基于 ChatMemory 视图生成.
 
 ## 4. 当前 vs 规划
 
-| 模块 | W1 (已完成) | W2 (已完成) | W3 (规划) | W4 (规划) |
+| 模块 | W1 (已完成) | W2 (已完成) | W3 (已完成) | W4 (规划) |
 |---|---|---|---|---|
 | 对话编排 | 单一 ChatService 内嵌 ReAct | ✅ IntentService → AgentRouter → Chatter/ToolWorker 三段式 | — | — |
 | 工具 | BuiltinToolRegistry 反射 3 个工具 | ✅ vh_intent_tool 多对多, ToolWorker 单轮 fan-out 真并行 | — | — |
-| 记忆 | STM (Redis 滑窗) | — | + Summary / Episodic / Semantic 三层 | — |
+| 记忆 | STM (Redis 滑窗) | — | ✅ Summary 滚动摘要 + Episodic 向量召回 + Semantic 用户事实 三层补齐 | — |
+| 嵌入 | — | — | ✅ BGE-small-zh-v15 in-process (512 维 ONNX, 无外部 key) | — |
+| 向量库 | — | — | ✅ Milvus 2.3 (IVF_FLAT/IP) + etcd + MinIO 三件套 | — |
+| 异步任务 | — | — | ✅ EpisodeFinalizationScheduler 5min 兜底索引 | — |
 | 模型 | DeepSeek 单 provider | — | — | + Claude/Qwen 多源 + fallback |
-| 观测 | SLF4J 文本日志 | ✅ execution_trace 落库 + traces.html 可视化 (含完整 messages 快照) | — | + Cost 聚合 + Eval pipeline |
-| 系统提示 | 静态人设 | ✅ SystemPromptComposer 注入运行时日期 | — | — |
+| 观测 | SLF4J 文本日志 | ✅ execution_trace 落库 + traces.html 可视化 (含完整 messages 快照) | ✅ 加 SUMMARY_WRITE / FACT_EXTRACT / MEMORY_RECALL / EPISODE_INDEX 四类异步/前置 step | + Cost 聚合 + Eval pipeline |
+| 系统提示 | 静态人设 | ✅ SystemPromptComposer 注入运行时日期 | ✅ 召回的 facts + episodes 动态注入 (不入 ChatMemory) | — |
 | 鉴权 | 无 (hardcode tenant=1) | — | — | RBAC + 多租户隔离 |
 
 ## 5. 关键设计决策（面试讲法）
@@ -301,11 +386,21 @@ flowchart LR
 6. **为什么意图与工具是多对多而不是单值 FK？** V1 schema 用 `vh_intent.bound_tool_id` 单值 FK 实现，跑通 ReAct 后发现并行执行块（`CompletableFuture.allOf`）名义并行实质串行——模型只能见一个 spec，不可能在单轮内吐多个 `ToolExecutionRequest`。V5 迁到 `vh_intent_tool` 多对多，把全部 active spec 注册给模型，单轮 fan-out 时 wall-clock ≈ max(各工具) 而非 sum。trace UI 上 `parallelGroupSize` 字段显式标注。
 7. **为什么往 system prompt 注入当前日期？** LLM 不知道当下时间会按训练数据分布乱猜（线上观察到春天的 4 月被回成"临近秋天"）。`SystemPromptComposer` 在每个会话首轮 SystemMessage 末尾追加"今天是 yyyy-MM-dd 周X"，把时间相关的回答钉死在运行时事实上。
 8. **为什么 trace 走 ThreadLocal `TraceCollector` + 出口批量持久化？** 同步主流程下 ThreadLocal 收集 + 出口一次性 `INSERT` 多行，避免热路径上每步同步 IO；流式回调跨线程不可用 ThreadLocal，因此流式入口直接构 `ExecutionTrace` 走 `TraceWriter` 单步落库，是个有意识的非对称。
+9. **为什么记忆要分四层？**（W3 亮点）单一 STM 永远不够：窗口 N=20，超出就丢；用户跨会话来再问"我家那只猫还好吗"会失忆。所以分层：
+   - **STM**（Redis 滑窗）热路径低延迟，每轮上下文用
+   - **Summary**（DB conversation_summary）当前会话被滚出窗口的内容压缩成一段 sticky 摘要，本会话内不忘
+   - **Episodic**（Milvus + memory_episode）跨会话的对话片段向量化，按当前 user message 相似度召回相关历史
+   - **Semantic**（DB memory_fact）从对话里抽出来的用户级稳定事实，每轮全量注入
+   - 对应认知科学的 STM/Episodic memory/Semantic memory 划分，也对标 MemGPT、ChatGPT Memory 等产品。
+10. **为什么 episode embedding 用本地 BGE-small-zh-v15 不用 OpenAI/DashScope？** 三个原因：(1) 不依赖外部 API key，部署门槛低；(2) BGE 在中文语料上效果好，512 维成本/质量平衡；(3) 体现"in-process 推理"作为面试加分项（多数 Java 后端 RAG 都是远程 embedding，本地 ONNX 是少见亮点）。代价是首次启动下载 ~100MB 模型，能接受。
+11. **为什么 facts/episodes 不进 ChatMemory，每轮重查？** ChatMemory 是 Redis 缓存，写进去就 sticky 了；facts/episodes 会随每轮抽取/索引而更新，写进 ChatMemory 会陈旧，要做 invalidate 同步。每轮重查 DB+Milvus 是 ~350ms 成本，但保证语义新鲜，比维护一致性简单。
+12. **为什么 EpisodeService 同时支持 ROLLUP / FINALIZE 两种触发？** 最初只有 ROLLUP（rollup 触发时索引被压缩段），实测发现 rollup 永远只覆盖前半段，**用户后期才说出的关键内容（kept tail）永远不入 Milvus**，跨会话召回拿不到。加 FINALIZE 兜底：会话空闲 5min 后由 scheduler 把当前 ChatMemory 里全部内容（含 tail）索引成第二个 episode。两种 episode 共存于 Milvus，召回时不区分 kind。
+13. **为什么 FactExtractor / Summary 的 prompt 显式区分 `[用户]` vs `[助手]`？** 实测发现初版会把助手即兴说的内容（"我也养猫，叫芝麻"）当成用户事实抽取，造成跨会话召回时 AI 误以为用户养了一只叫芝麻的猫。修补：prompt 显式声明只从 `[用户]` 行抽取，且不要把助手即兴细节写入摘要。这是"prompt isolation"在分层记忆里的实践。
 
 ## 6. 后续待办
 
-- W3 四层记忆系统（亮点 #1）：Summary 滚动摘要 / Episodic 向量召回 / Semantic 用户画像
-- W4 成本统计 + 评估 pipeline + demo 视频
-- 低优：流式 + 意图路由合流（`chatAsStream` 接 Worker 链路，要解决"工具阶段是否推流"的 UX 问题，当前 chat.html 已切回非流式跑通完整链路）
+- W4 成本统计（token / 美元聚合到 conversation 维度）+ 评估 pipeline（20 条 golden case 验证记忆召回 + 工具调用准确性）+ demo 视频
+- W4 多 Provider fallback：DeepSeek 主路 + Claude/Qwen 兜底
+- 低优：`message` 表落审计（目前 STM 是消息唯一源，TTL 7d 后丢失）；流式 + 意图路由合流；记忆衰减/遗忘曲线；事实/episode 冲突解决
 
 > 图本身用 Mermaid，GitHub 直接渲染。如需 Excalidraw 风格的导出，可在 [excalidraw.com/+mermaid](https://excalidraw.com) 粘贴上面任意 mermaid block 转换。

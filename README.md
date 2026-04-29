@@ -2,7 +2,7 @@
 
 Java + LangChain4j 搭建的虚拟人平台，聚焦两大亮点：**分层记忆系统**、**Agent 编排（Router + ReAct + Parallel Tools）**。
 
-状态：🚧 MVP 开发中（1 个月路线图，当前 Week 2 收尾）
+状态：🚧 MVP 开发中（1 个月路线图，当前 Week 3 收尾）
 
 ## 技术栈
 
@@ -61,18 +61,21 @@ curl http://localhost:8080/actuator/health
 ### 4. 试用
 
 - 聊天页面：<http://localhost:8080/chat.html>（默认走非流式 `/api/virtual-humans/{id}/chat`，完整 Intent → Router → Worker 链路）
-- Trace 浏览：<http://localhost:8080/traces.html>（按会话查看每轮 LLM 调用 + 工具调用，可展开看完整 prompt 与 input/output JSON）
+- Trace 浏览：<http://localhost:8080/traces.html>（按会话查看每轮 LLM 调用 + 工具调用 + 记忆召回/抽取，可展开看完整 prompt 与 input/output JSON）
 
-试一句 "上海现在多少度，顺便告诉我现在几点"：会命中 `weather_query` 意图，单轮 LLM_CHAT 内并行请求 weather + current_time 两个工具。
+几个 demo 句：
+- 工具并行：「上海现在多少度，顺便告诉我现在几点」→ 单轮 LLM_CHAT 内 fan-out weather + current_time
+- 跨会话 facts：会话 A 说"我叫小张，养了只猫" → 关掉浏览器开会话 B 问"你记得我叫啥吗" → 命中 fact 召回
+- 跨会话 episodes：会话 A 聊一长串关于猫的具体细节 → 等 5min 让 finalize scheduler 跑 → 会话 B 问相关话题 → 召回到 episode
 
 ## 路线图
 
 | 周 | 里程碑 |
 |---|---|
 | W1 | 基础对话 + 工具调用 + SSE 流式 ✅ |
-| W2 | Agent 编排（Router + ReAct + Parallel）+ trace 落库 + 可视化 ← **当前** |
-| W3 | 记忆四层（STM / Summary / Episodic / Semantic） |
-| W4 | 成本统计 + README + 架构图 + demo 视频 |
+| W2 | Agent 编排（Router + ReAct + Parallel）+ trace 落库 + 可视化 ✅ |
+| W3 | 分层记忆（STM / Summary / Episodic / Semantic）+ Milvus + 异步索引兜底 ← **当前** |
+| W4 | 成本统计 + 评估 pipeline + 多 Provider fallback + demo 视频 |
 
 详细设计文档:
 - [架构总览](docs/architecture.md) — 分层、时序、数据流三张图 + 关键设计决策

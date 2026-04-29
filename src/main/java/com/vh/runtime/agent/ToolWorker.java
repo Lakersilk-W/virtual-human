@@ -4,6 +4,7 @@ import com.vh.repository.entity.ToolDef;
 import com.vh.runtime.chat.ChatService;
 import com.vh.runtime.chat.ConversationService;
 import com.vh.runtime.config.SystemPromptComposer;
+import com.vh.runtime.memory.MemoryRecallService;
 import com.vh.runtime.model.ChatModelFactory;
 import com.vh.runtime.tool.BuiltinToolRegistry;
 import com.vh.runtime.trace.TraceCollector;
@@ -11,6 +12,7 @@ import com.vh.runtime.trace.TraceStep;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -53,6 +55,7 @@ public class ToolWorker implements Worker {
     private final ChatModelFactory chatModelFactory;
     private final BuiltinToolRegistry toolRegistry;
     private final ConversationService conversationService;
+    private final MemoryRecallService memoryRecallService;
     private final TraceCollector traceCollector;
 
     @Override
@@ -88,17 +91,22 @@ public class ToolWorker implements Worker {
                 ? "(none)"
                 : specs.stream().map(ToolSpecification::name).collect(Collectors.joining(","));
 
+        // 召回长期记忆 (facts + episodes), 整个 ReAct 循环复用 (轮内不变)
+        List<SystemMessage> recalled = memoryRecallService.recall(
+                ctx.conversation().getUserId(), ctx.conversationId(), ctx.userMessage());
+
         long totalMs = 0;
         int totalPTok = 0, totalCTok = 0, toolCalls = 0, iter = 0;
         ChatResponse response = null;
 
         while (iter < MAX_ITERATIONS) {
             iter++;
-            var messagesSnapshot = MessageDumpUtil.dump(mem.messages());
+            List<ChatMessage> effective = ChatterWorker.composeEffective(mem.messages(), recalled);
+            var messagesSnapshot = MessageDumpUtil.dump(effective);
 
             long start = System.currentTimeMillis();
             response = model.chat(ChatRequest.builder()
-                    .messages(mem.messages())
+                    .messages(effective)
                     .toolSpecifications(specs)
                     .build());
             long thisRoundMs = System.currentTimeMillis() - start;
