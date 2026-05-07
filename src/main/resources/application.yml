@@ -53,6 +53,14 @@ vh:
       default-model: deepseek-chat
       temperature: 0.7
       timeout-seconds: 60
+    # W4.D25: 主 model 抛错时按顺序退到下一个; 末尾自动追加 echo 兜底, 保证永不抛.
+    # 接 Qwen / 智谱 / Claude 时只需在 chain 加一项 (Qwen/智谱 OpenAI 兼容协议复用 deepseek 路径).
+    fallback:
+      enabled: true
+      always-echo: true
+      chain:
+        - provider: deepseek
+          model: deepseek-reasoner
   milvus:
     host: ${MILVUS_HOST:localhost}
     port: ${MILVUS_PORT:19530}

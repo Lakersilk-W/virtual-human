@@ -28,6 +28,7 @@ application-local.yml
 application-*.yml
 !application.yml
 !application-example.yml
+!application-eval.yml
 
 # docker volumes in-repo (if any)
 data/

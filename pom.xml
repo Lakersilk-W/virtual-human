@@ -100,6 +100,12 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- W4.D24: Eval pipeline 用 YAML 描述 golden cases -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

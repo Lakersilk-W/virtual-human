@@ -1,0 +1,212 @@
+# =============================================================================
+# 虚拟人 W4.D24 — 20 条 golden case
+#
+# 真实跑 LLM (DeepSeek), 每条 case 自动隔离 user_id, target/setup 各自隔离
+# conversationId, 跑完查 execution_trace + reply 做结构化断言.
+#
+# 触发: ./mvnw spring-boot:run -Dspring-boot.run.profiles=eval
+# =============================================================================
+
+# ---------- 意图分类: 5 条, 覆盖 6 个意图中各代表场景 ----------
+- id: intent-weather-1
+  group: intent
+  desc: "天气类问题应分类到 weather_query"
+  target:
+    message: 上海现在多少度
+  expect:
+    intentCode: weather_query
+
+- id: intent-calc-1
+  group: intent
+  desc: "算式问题应分类到 calculation"
+  target:
+    message: 帮我算一下 (45+30) 乘 2 等于多少
+  expect:
+    intentCode: calculation
+
+- id: intent-time-1
+  group: intent
+  desc: "时间类问题应分类到 time_query"
+  target:
+    message: 现在几点了
+  expect:
+    intentCode: time_query
+
+- id: intent-book-1
+  group: intent
+  desc: "求书推荐应分类到 book_recommendation"
+  target:
+    message: 最近想读点散文, 有什么推荐吗
+  expect:
+    intentCode: book_recommendation
+
+- id: intent-chitchat-1
+  group: intent
+  desc: "纯问候应分类到 chitchat (兜底意图)"
+  target:
+    message: 你好呀, 在吗
+  expect:
+    intentCode: chitchat
+
+# ---------- 工具调用: 5 条 ----------
+- id: tools-weather-1
+  group: tools
+  desc: "天气问题应调 getWeather 工具"
+  target:
+    message: 上海现在天气怎么样
+  expect:
+    intentCode: weather_query
+    toolsCalled: [getWeather]
+
+- id: tools-calc-1
+  group: tools
+  desc: "算式应调 calculate 工具且回复含正确结果 150"
+  target:
+    message: 用计算器帮我算 (45+30)*2 是多少
+  expect:
+    intentCode: calculation
+    toolsCalled: [calculate]
+    replyContainsAny: ["150"]
+
+- id: tools-time-1
+  group: tools
+  desc: "时间问题应调 getCurrentTime 工具"
+  target:
+    message: 现在北京几点了
+  expect:
+    intentCode: time_query
+    toolsCalled: [getCurrentTime]
+
+- id: tools-parallel-1
+  group: tools
+  desc: "天气+时间合并问应单轮并行调用两个工具 (parallelGroupSize >= 2)"
+  target:
+    message: 上海现在多少度, 顺便告诉我现在几点
+  expect:
+    intentCode: weather_query
+    toolsCalled: [getWeather, getCurrentTime]
+    parallelGroupSizeMin: 2
+
+- id: tools-calc-decimal-1
+  group: tools
+  desc: "小数除法应得正确结果 32"
+  target:
+    message: 帮我算下 128 除以 4 等于多少, 用计算器
+  expect:
+    intentCode: calculation
+    toolsCalled: [calculate]
+    replyContainsAny: ["32"]
+
+# ---------- Facts 抽取 (Semantic 层): 3 条 ----------
+- id: facts-extract-name-1
+  group: facts_extract
+  desc: "用户报名字应被抽到 name 类 fact"
+  target:
+    message: 我叫小张, 平时喜欢看推理小说
+  expect:
+    extractedFactKeyContains: [name]
+
+- id: facts-extract-pet-1
+  group: facts_extract
+  desc: "用户报养宠应被抽到 pet 类 fact"
+  target:
+    message: 我家养了一只叫芝麻的橘猫, 三岁
+  expect:
+    extractedFactKeyContains: [pet]
+
+- id: facts-extract-occupation-1
+  group: facts_extract
+  desc: "用户报职业应被抽到 occupation 类 fact"
+  target:
+    message: 我在杭州做后端工程师, 用 Java 比较多
+  expect:
+    extractedFactKeyContains: [occupation]
+
+# ---------- Facts 召回: 3 条 (跨会话) ----------
+- id: facts-recall-name-1
+  group: facts_recall
+  desc: "setup 会话报名后, target 新会话应能召回 name fact"
+  setup:
+    - convKey: A
+      message: 我叫王磊, 朋友都叫我老王
+  target:
+    convKey: B
+    message: 你还记得我叫什么吗
+  expect:
+    recallFactKeyContains: [name]
+
+- id: facts-recall-pet-1
+  group: facts_recall
+  desc: "setup 会话报养宠后, target 新会话讨论宠物应召回 pet fact"
+  setup:
+    - convKey: A
+      message: 我家有只布偶猫, 名字叫雪糕
+  target:
+    convKey: B
+    message: 我家那个小毛球今天又拆家了
+  expect:
+    recallFactKeyContains: [pet]
+
+- id: facts-recall-city-1
+  group: facts_recall
+  desc: "setup 会话报城市后, target 新会话问推荐应召回 city fact"
+  setup:
+    - convKey: A
+      message: 我目前在成都生活, 喜欢这边节奏
+  target:
+    convKey: B
+    message: 周末有什么消遣推荐
+  expect:
+    recallFactKeyContains: [city]
+
+# ---------- Episodes 召回 (Episodic 层): 2 条 ----------
+# 用 action: index_episode 直接索引一段 episode, 跳过 LLM 摘要环节,
+# 让断言专注在 Milvus 召回链路本身 (embed → search → 注入).
+- id: episodes-recall-cat-1
+  group: episodes_recall
+  desc: "预先索引一段聊猫的 episode 后, 同主题查询应召回 (count >= 1)"
+  setup:
+    - convKey: A
+      action: index_episode
+      episodeText: |
+        用户讲了他家布偶猫雪糕的日常, 包括最近食欲变差去了医院,
+        医生说可能是换季应激, 开了点益生菌. 用户决定换湿粮试试.
+  target:
+    convKey: B
+    message: 我家猫最近又有点不爱吃东西, 之前医生说的方法还有效吗
+  expect:
+    recallEpisodeCountMin: 1
+
+- id: episodes-recall-travel-1
+  group: episodes_recall
+  desc: "预先索引一段聊旅行的 episode 后, 旅行查询应召回"
+  setup:
+    - convKey: A
+      action: index_episode
+      episodeText: |
+        用户上周末去了杭州西湖一带, 拍了不少照片, 提到雷峰塔和苏堤,
+        最喜欢早上的薄雾湖面. 还推荐了几家咖啡馆.
+  target:
+    convKey: B
+    message: 你之前听我聊过的那次出去玩, 有什么后续吗
+  expect:
+    recallEpisodeCountMin: 1
+
+# ---------- 闲聊兜底: 2 条 ----------
+- id: chitchat-greeting-1
+  group: chitchat
+  desc: "纯问候应走兜底意图且不触发工具"
+  target:
+    message: 嗨, 周末过得怎么样
+  expect:
+    intentCode: chitchat
+    toolsCalled: []
+
+- id: chitchat-emotion-1
+  group: chitchat
+  desc: "情感倾诉应走兜底意图且不触发工具"
+  target:
+    message: 今天上班好累, 感觉一天都没回过神
+  expect:
+    intentCode: chitchat
+    toolsCalled: []

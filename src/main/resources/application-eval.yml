@@ -1,0 +1,21 @@
+# =============================================================================
+# eval profile (W4.D24): 跑 golden case eval 时降噪 / 禁不必要 ext
+# 启动: ./mvnw spring-boot:run -Dspring-boot.run.profiles=eval
+# =============================================================================
+
+vh:
+  eval:
+    casesFile: eval/golden-cases.yaml
+    reportDir: logs
+
+logging:
+  level:
+    # mybatis SQL 日志会刷屏, eval 关闭
+    root: INFO
+    com.vh: INFO
+    com.vh.eval: INFO
+    com.baomidou.mybatisplus: WARN
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl

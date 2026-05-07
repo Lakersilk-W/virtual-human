@@ -1,6 +1,6 @@
 # 架构总览
 
-> 截至 W3 收尾（2026-04-29），已实现的部分用实线框，规划中的部分用虚线框。
+> 截至 W4 收尾（2026-05-06），已实现的部分用实线框，规划中的部分用虚线框。
 
 ## 1. 分层架构
 
@@ -137,11 +137,14 @@ flowchart TB
         Wttr(("wttr.in<br/>免 key 天气"))
     end
 
-    subgraph Planned["规划中 (W4)"]
+    subgraph W4Pkg["W4: cost / fallback / eval"]
         direction TB
-        CostTrack["CostTracker<br/>token / 成本聚合"]
-        Eval["Evaluator<br/>20 条 golden case"]
-        FallbackProvider["多 Provider fallback<br/>Claude / Qwen"]
+        CostDec["CostTrackingChatModel<br/>装饰器, 自动落 cost_record"]
+        CostTrk[CostTracker<br/>按 vh.pricing.* 折算 USD]
+        Fallback["FallbackChatModel<br/>多 tier 顺序退路"]
+        Echo["EchoChatModel<br/>末位兜底, 永不抛"]
+        EvalRunner["EvalRunner @Profile(eval)<br/>20 条 golden case 跑批"]
+        EvalEng["EvalAssertionEngine<br/>读 execution_trace 做断言"]
     end
 
     Client --> Web
@@ -174,8 +177,15 @@ flowchart TB
     ModelFactory -.HTTPS.-> DeepSeek
     Weather -.HTTPS.-> Wttr
 
+    ModelFactory --> Fallback
+    Fallback --> CostDec
+    Fallback --> Echo
+    CostDec --> CostTrk
+    CostTrk --> CostRec[(cost_record)]
+    EvalRunner --> EvalEng
+    EvalEng --> TraceMap
+
     classDef planned stroke-dasharray: 5 5,fill:#fafafa,stroke:#999,color:#666
-    class Planned,CostTrack,Eval,FallbackProvider planned
 ```
 
 ## 2. 一次 `chatAs` 调用的完整时序
@@ -363,7 +373,7 @@ flowchart LR
 
 ## 4. 当前 vs 规划
 
-| 模块 | W1 (已完成) | W2 (已完成) | W3 (已完成) | W4 (规划) |
+| 模块 | W1 (已完成) | W2 (已完成) | W3 (已完成) | W4 (已完成) |
 |---|---|---|---|---|
 | 对话编排 | 单一 ChatService 内嵌 ReAct | ✅ IntentService → AgentRouter → Chatter/ToolWorker 三段式 | — | — |
 | 工具 | BuiltinToolRegistry 反射 3 个工具 | ✅ vh_intent_tool 多对多, ToolWorker 单轮 fan-out 真并行 | — | — |
@@ -371,10 +381,12 @@ flowchart LR
 | 嵌入 | — | — | ✅ BGE-small-zh-v15 in-process (512 维 ONNX, 无外部 key) | — |
 | 向量库 | — | — | ✅ Milvus 2.3 (IVF_FLAT/IP) + etcd + MinIO 三件套 | — |
 | 异步任务 | — | — | ✅ EpisodeFinalizationScheduler 5min 兜底索引 | — |
-| 模型 | DeepSeek 单 provider | — | — | + Claude/Qwen 多源 + fallback |
-| 观测 | SLF4J 文本日志 | ✅ execution_trace 落库 + traces.html 可视化 (含完整 messages 快照) | ✅ 加 SUMMARY_WRITE / FACT_EXTRACT / MEMORY_RECALL / EPISODE_INDEX 四类异步/前置 step | + Cost 聚合 + Eval pipeline |
+| 模型 | DeepSeek 单 provider | — | — | ✅ FallbackChatModel chain (deepseek-chat → reasoner → echo), 配置可扩 Qwen/Claude |
+| 成本 | — | — | — | ✅ CostTrackingChatModel 装饰器 + cost_record 表 + /api/costs/* 三端点 |
+| 评估 | — | — | — | ✅ 20 条 golden case YAML + EvalRunner CommandLineRunner + 结构化断言 + JSON 报告 |
+| 观测 | SLF4J 文本日志 | ✅ execution_trace 落库 + traces.html 可视化 (含完整 messages 快照) | ✅ 加 SUMMARY_WRITE / FACT_EXTRACT / MEMORY_RECALL / EPISODE_INDEX 四类异步/前置 step | ✅ 成本字段并入 trace UI (按会话/今日/按模型聚合) |
 | 系统提示 | 静态人设 | ✅ SystemPromptComposer 注入运行时日期 | ✅ 召回的 facts + episodes 动态注入 (不入 ChatMemory) | — |
-| 鉴权 | 无 (hardcode tenant=1) | — | — | RBAC + 多租户隔离 |
+| 鉴权 | 无 (hardcode tenant=1) | — | — | 后续: RBAC + 多租户隔离 |
 
 ## 5. 关键设计决策（面试讲法）
 
@@ -396,11 +408,17 @@ flowchart LR
 11. **为什么 facts/episodes 不进 ChatMemory，每轮重查？** ChatMemory 是 Redis 缓存，写进去就 sticky 了；facts/episodes 会随每轮抽取/索引而更新，写进 ChatMemory 会陈旧，要做 invalidate 同步。每轮重查 DB+Milvus 是 ~350ms 成本，但保证语义新鲜，比维护一致性简单。
 12. **为什么 EpisodeService 同时支持 ROLLUP / FINALIZE 两种触发？** 最初只有 ROLLUP（rollup 触发时索引被压缩段），实测发现 rollup 永远只覆盖前半段，**用户后期才说出的关键内容（kept tail）永远不入 Milvus**，跨会话召回拿不到。加 FINALIZE 兜底：会话空闲 5min 后由 scheduler 把当前 ChatMemory 里全部内容（含 tail）索引成第二个 episode。两种 episode 共存于 Milvus，召回时不区分 kind。
 13. **为什么 FactExtractor / Summary 的 prompt 显式区分 `[用户]` vs `[助手]`？** 实测发现初版会把助手即兴说的内容（"我也养猫，叫芝麻"）当成用户事实抽取，造成跨会话召回时 AI 误以为用户养了一只叫芝麻的猫。修补：prompt 显式声明只从 `[用户]` 行抽取，且不要把助手即兴细节写入摘要。这是"prompt isolation"在分层记忆里的实践。
+14. **为什么 cost tracking 走 ChatModel 装饰器而不是 ChatModelListener？**（W4 亮点）LangChain4j 提供 `ChatModelListener.onResponse` 钩子可以拿到 `TokenUsage`，但有两个不便：(1) listener 是按 ChatModel 实例注册的，要在每个 build 处都 attach，分散；(2) listener 拿不到调用上下文（会话 id），需要再走 ThreadLocal 桥接。装饰器方案是 `CostTrackingChatModel implements ChatModel`，在 `ChatModelFactory` 这一个收口处统一包装；TokenUsage 从 `ChatResponse.tokenUsage()` 直接拿；conversationId 从 `TraceCollector.currentConversationId()` 取（ThreadLocal）。Fallback chain 上每一 tier 各自 wrap CostTracking，所以 fallback 切换时也不会漏记 cost。
+15. **为什么 fallback 配置的是 chain，不是健康度+熔断？**（W4 亮点）1 个月 MVP 范围下，"失败即切换"已经覆盖 90% 价值场景：DeepSeek 偶发限流 / 网络抖动 / 单 model 临时故障。引入 resilience4j 的健康统计 + 熔断 + 退避会增加一层状态机与配置面，但讲不出更多故事。chain 顺序是配置里的 `vh.llm.fallback.chain`，调用方零感知；末位由 `alwaysEcho=true` 自动追加 `EchoChatModel` 保证永不抛。装饰链：`FallbackChatModel(CostTracking(deepseek-chat) → CostTracking(deepseek-reasoner) → Echo)`。
+16. **为什么 eval 走独立 `@Profile("eval")` CommandLineRunner，不走 JUnit？**（W4 亮点）Eval 真打 LLM、要 docker 起 mysql/redis/milvus、单跑 5-10 分钟，性质上是"集成验证"而非单元测试，混进 `mvn test` 会污染 CI（成本 + 速度 + 外网依赖）。独立 profile 让它跟 `mvn test` 完全隔离；CommandLineRunner 启动后自动跑 + exit，可作为 demo 截图载体；隔离 `userId` (起点 900_000) + `channel="EVAL"` 防止污染 demo 会话；断言不走"LLM-as-judge"而是读 `execution_trace` 表做结构化比对——避免引入额外 LLM 调用与不确定性。
+17. **为什么 eval 的 episodes 召回 case 用 `action: index_episode` 直接索引，跳过 LLM 摘要？** 真实路径是 rollup 时 SummaryService 调 LLM 生成摘要，再交给 EpisodeService 索引——但要触发 rollup 必须堆 ≥16 条 chat history（每条都要打 LLM），单 case 成本不可接受。`action: index_episode` 让 setup 直接调 `EpisodeService.index(text, text, ...)`，专注验证 Milvus embed → search → 注入这条召回链路本身；rollup 触发逻辑由 `SummaryService` 自己的单元行为已覆盖，不必每条 case 重复验证。
 
 ## 6. 后续待办
 
-- W4 成本统计（token / 美元聚合到 conversation 维度）+ 评估 pipeline（20 条 golden case 验证记忆召回 + 工具调用准确性）+ demo 视频
-- W4 多 Provider fallback：DeepSeek 主路 + Claude/Qwen 兜底
-- 低优：`message` 表落审计（目前 STM 是消息唯一源，TTL 7d 后丢失）；流式 + 意图路由合流；记忆衰减/遗忘曲线；事实/episode 冲突解决
+- 接入第二个真实 provider (Qwen / 智谱 / Claude) 实化 fallback chain（当前 chain 只在 deepseek 内部退路）
+- LLM-as-judge 评估（在 20 条结构化断言之外，用更强模型给生成质量打分）
+- `message` 表落审计（目前 STM 是消息唯一源，TTL 7d 后丢失）
+- 流式 + 意图路由合流；记忆衰减 / 遗忘曲线；事实 / episode 冲突解决
+- RBAC + 多租户隔离（当前 hardcode tenant=1）
 
 > 图本身用 Mermaid，GitHub 直接渲染。如需 Excalidraw 风格的导出，可在 [excalidraw.com/+mermaid](https://excalidraw.com) 粘贴上面任意 mermaid block 转换。

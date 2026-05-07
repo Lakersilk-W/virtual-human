@@ -14,6 +14,7 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.memory.ChatMemory;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -41,6 +42,7 @@ import java.util.List;
  */
 @Slf4j
 @Component
+@Profile("!eval") // W4.D24: eval 跑批时不要让 scheduler 干扰隔离 conversation
 @RequiredArgsConstructor
 public class EpisodeFinalizationScheduler {
 
